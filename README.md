@@ -10,12 +10,12 @@ Built for the [Vision Possible: Agent Protocol](https://wemakedevs.org) hackatho
 
 ## Demo
 
-| Live Camera + Skeleton Overlay | Fall Detected → Phone Dispatch |
-|---|---|
-| YOLO Pose draws 17-keypoint skeleton on every person in real-time | ARIA detects collapse, Gemini confirms visually, nurse called automatically |
+![ARIA Dashboard — Patient fall detected, nurse dispatched automatically](docs/aria-demo.png)
+
+*ARIA detects a patient collapse via YOLO Pose skeleton tracking → Gemini Realtime confirms visually → nurse 101 called automatically → live situational updates on the incident card.*
 
 **What ARIA detects:**
-- **Patient Fall / Sudden Collapse** — YOLO Pose tracks skeleton motion + body position, Gemini Realtime visually confirms before dispatching
+- **Patient Fall / Sudden Collapse** — Gemini Realtime watches the live camera feed and proactively detects when a patient falls, collapses, or goes down. YOLO Pose provides 17-keypoint skeleton overlay for visual monitoring.
 
 ---
 
