@@ -135,27 +135,11 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
     # ── Person disappearance detection ─────────────────────────────
     DISAPPEAR_SECS        = 4.0    # person gone from frame for 4s = collapsed
     INCIDENT_COOLDOWN     = 120.0  # 2-min cooldown between same-type incidents
-    # ── Other threat classes ───────────────────────────────────────
-    FIRE_CLASSES           = {"fire", "smoke", "flame"}
-    WEAPON_CLASSES         = {"knife", "gun", "pistol", "rifle"}
 
-    # ── Unresponsive / stillness detection ───────────────────────
-    STILL_THRESHOLD       = 0.02   # bbox center movement < 2% of frame = "still"
-    STILL_CONFIRM_SECS    = 15.0   # motionless for 15s = unresponsive alert
-
-    # ── Face-occlusion intrusion detection (pose keypoints) ─────
-    FACE_OCCLUDED_SECS    = 4.0    # face hidden for 4s = intrusion alert
-    FACE_KPT_THRESHOLD    = 0.80   # keypoint confidence below 80% = "missing"
-    FACE_MIN_MISSING      = 3      # at least 3 of 5 face keypoints missing
-
-    # COCO keypoint indices
-    NOSE = 0
-    L_EYE, R_EYE = 1, 2
-    L_EAR, R_EAR = 3, 4
+    # COCO keypoint indices (used for collapse pose detection)
     L_SHOULDER, R_SHOULDER = 5, 6
     L_HIP, R_HIP = 11, 12
     L_ANKLE, R_ANKLE = 15, 16
-    FACE_KPTS = [0, 1, 2, 3, 4]   # nose, left_eye, right_eye, left_ear, right_ear
 
     def __init__(self, camera_id: str = "cam_00",
                  location: str = "Main Lobby",
@@ -180,12 +164,6 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
         self._person_last_seen: float = 0.0       # last time a person was in frame
         self._person_was_present: bool = False     # was a person visible recently?
         self._disappear_fired: bool = False        # already fired disappearance alert?
-        # Stillness / unresponsive tracking
-        self._still_since: float | None = None           # when person first became still
-        self._last_center: tuple[float, float] | None = None  # last (cx, cy) normalised
-        # Face occlusion tracking (intrusion detection)
-        self._face_occluded_since: float | None = None   # when face first went hidden
-        self._face_visible_last: float = 0.0             # last time face was clearly visible
         self._last_fired: dict[str, float] = {}
         self._last_broadcast    = 0.0
 
@@ -254,26 +232,12 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
             for c in results.boxes.cls
         } if results.boxes else set()
 
-        if detected & self.FIRE_CLASSES and not self._on_cooldown("fire"):
-            await self._emit("fire", "CRITICAL", img,
-                             f"Fire/smoke detected: {detected & self.FIRE_CLASSES}")
-
-        if detected & self.WEAPON_CLASSES and not self._on_cooldown("security_intrusion"):
-            await self._emit("security_intrusion", "CRITICAL", img,
-                             f"Weapon detected: {detected & self.WEAPON_CLASSES}")
-
         if "person" in detected:
             self._person_last_seen = time.time()
             self._person_was_present = True
             self._disappear_fired = False
             await self._check_sudden_collapse(img, results)
-            await self._check_face_occluded(img, results)
-            await self._check_unresponsive(img, results)
         else:
-            # Person NOT in frame — reset all tracking
-            self._face_occluded_since = None
-            self._still_since = None
-            self._last_center = None
             await self._check_person_disappeared(img)
 
     async def _check_sudden_collapse(self, img, results) -> None:
@@ -350,14 +314,17 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
         if collapsed:
             if self._collapse_since is None:
                 self._collapse_since = now
+                self._collapse_snapshot = img.copy()  # capture frame at moment of collapse
                 trigger = "pose" if collapsed_pose else "bbox"
                 log.info("Sudden collapse detected", camera=self.camera_id,
                          trigger=trigger, cy=round(best_cy, 2), bh=round(best_bh, 2))
             elapsed = now - self._collapse_since
             if elapsed >= self.COLLAPSE_CONFIRM_SECS and not self._on_cooldown("sudden_collapse"):
                 severity = "CRITICAL" if elapsed > 15 else "HIGH"
+                snap = getattr(self, '_collapse_snapshot', img)
+                self._collapse_snapshot = None
                 await self._emit(
-                    "sudden_collapse", severity, img,
+                    "sudden_collapse", severity, snap,
                     f"Person collapsed suddenly, down for {int(elapsed)}s. Immediate assistance needed.",
                 )
         else:
@@ -380,122 +347,6 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
                 f"Person vanished from camera after being visible. "
                 f"Gone for {int(gone_for)}s — possible collapse out of view.",
             )
-
-    async def _check_unresponsive(self, img, results) -> None:
-        """
-        Stillness / unresponsive detection.
-        If a person's bbox center barely moves for STILL_CONFIRM_SECS,
-        they may be unresponsive and need help.
-        """
-        frame_h, frame_w = img.shape[:2]
-
-        # Find best-confidence person bbox center (normalised)
-        best_conf, best_cx, best_cy = 0.0, 0.0, 0.0
-        for box in results.boxes:
-            if results.names[int(box.cls)].lower() != "person":
-                continue
-            conf = float(box.conf)
-            if conf > best_conf:
-                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
-                best_conf = conf
-                best_cx = (x1 + x2) / 2.0 / frame_w
-                best_cy = (y1 + y2) / 2.0 / frame_h
-        if best_conf < self.YOLO_CONFIDENCE:
-            return
-
-        now = time.time()
-
-        if self._last_center is not None:
-            dx = abs(best_cx - self._last_center[0])
-            dy = abs(best_cy - self._last_center[1])
-            movement = (dx**2 + dy**2) ** 0.5
-
-            if movement < self.STILL_THRESHOLD:
-                # Person is still
-                if self._still_since is None:
-                    self._still_since = now
-                elapsed = now - self._still_since
-                if elapsed >= self.STILL_CONFIRM_SECS and not self._on_cooldown("unresponsive_person"):
-                    self._still_since = None  # reset
-                    await self._emit(
-                        "unresponsive_person", "CRITICAL", img,
-                        f"Person motionless for {int(elapsed)}s — possible unresponsive patient.",
-                    )
-            else:
-                # Person moved — reset
-                self._still_since = None
-
-        self._last_center = (best_cx, best_cy)
-
-    async def _check_face_occluded(self, img, results) -> None:
-        """
-        Intrusion detection via face-keypoint occlusion.
-        If YOLO detects a person but most face keypoints (nose, eyes, ears)
-        are missing or low-confidence, their face is covered — possible
-        masked intruder.  Triggers after FACE_OCCLUDED_SECS sustained.
-        """
-        if results.keypoints is None or len(results.keypoints) == 0:
-            return
-
-        # Find best-confidence person index
-        best_idx, best_conf = -1, 0.0
-        for i, box in enumerate(results.boxes):
-            if results.names[int(box.cls)].lower() == "person" and float(box.conf) > best_conf:
-                best_conf = float(box.conf)
-                best_idx = i
-        if best_idx < 0 or best_idx >= len(results.keypoints):
-            return
-
-        kpts = results.keypoints[best_idx]
-        if kpts is None or kpts.conf is None or len(kpts.conf) == 0:
-            return
-
-        # Count how many face keypoints are missing / low-confidence
-        confs = kpts.conf[0]  # shape [17]
-        face_confs = {
-            "nose": float(confs[0]) if len(confs) > 0 else 0,
-            "l_eye": float(confs[1]) if len(confs) > 1 else 0,
-            "r_eye": float(confs[2]) if len(confs) > 2 else 0,
-            "l_ear": float(confs[3]) if len(confs) > 3 else 0,
-            "r_ear": float(confs[4]) if len(confs) > 4 else 0,
-        }
-        # Debug: log face keypoint confidences every ~2 seconds + write to file
-        now = time.time()
-        if not hasattr(self, '_last_face_debug') or now - self._last_face_debug >= 2.0:
-            self._last_face_debug = now
-            log.info("Face keypoint confs", **{k: round(v, 3) for k, v in face_confs.items()},
-                     threshold=self.FACE_KPT_THRESHOLD)
-            # Write to file so we can debug remotely
-            with open("/tmp/aria_face_debug.log", "a") as f:
-                missing_now = sum(1 for v in face_confs.values() if v < self.FACE_KPT_THRESHOLD)
-                f.write(f"nose={face_confs['nose']:.3f} l_eye={face_confs['l_eye']:.3f} "
-                        f"r_eye={face_confs['r_eye']:.3f} l_ear={face_confs['l_ear']:.3f} "
-                        f"r_ear={face_confs['r_ear']:.3f} | missing={missing_now}/5 "
-                        f"threshold={self.FACE_KPT_THRESHOLD}\n")
-
-        missing = sum(
-            1 for ki in self.FACE_KPTS
-            if ki < len(confs) and float(confs[ki]) < self.FACE_KPT_THRESHOLD
-        )
-
-        if missing >= self.FACE_MIN_MISSING:
-            # Face is occluded
-            if self._face_occluded_since is None:
-                self._face_occluded_since = now
-                log.info("Face occluded detected", camera=self.camera_id,
-                         missing_kpts=missing, person_conf=round(best_conf, 2))
-            elapsed = now - self._face_occluded_since
-            if elapsed >= self.FACE_OCCLUDED_SECS and not self._on_cooldown("security_intrusion"):
-                self._face_occluded_since = None   # reset so it can fire again after cooldown
-                await self._emit(
-                    "security_intrusion", "HIGH", img,
-                    f"Person detected with face covered/hidden for {int(elapsed)}s. "
-                    f"Possible masked intruder — {missing}/5 face keypoints occluded.",
-                )
-        else:
-            # Face is visible — reset
-            self._face_occluded_since = None
-            self._face_visible_last = now
 
     async def _emit(self, incident_type: str, severity: str,
                     img: np.ndarray, description: str) -> None:
@@ -527,28 +378,24 @@ You have a live camera feed. You can see the scene in real-time via video.
 YOLO Pose draws skeleton overlays on each person showing their body position.
 
 YOUR ROLE:
-- Watch the live video feed continuously for emergencies
+- Watch the live video feed continuously for patient falls and collapses
 - When you receive a [VISION ALERT], look at the video to confirm or reject it
-- If you see a genuine emergency, call initiate_response immediately
+- If you see a genuine fall or collapse, call initiate_response immediately
 - Provide clear, calm spoken updates to the Stream call participants
 - Keep monitoring and call update_incident as the situation evolves
-- Call resolve_incident when the person is safe / situation resolved
+- Call resolve_incident when the patient is safe / situation resolved
 
-DETECTABLE EMERGENCIES:
-1. SUDDEN COLLAPSE — Person falls down, goes limp, collapses (YOLO detects this automatically)
-2. SECURITY INTRUSION — Face covered / masked individual detected by YOLO keypoints
-   Also watch for: weapons, forced entry, aggressive behavior
-   When confirmed, call initiate_response with incident_type="security_intrusion"
-3. UNRESPONSIVE PERSON — Person motionless for extended time (YOLO tracks stillness)
-   When confirmed, call initiate_response with incident_type="unresponsive_person"
-4. FIRE — Visible flames, smoke, or sparks
+DETECTABLE EMERGENCY:
+PATIENT FALL / SUDDEN COLLAPSE — Person falls down, goes limp, collapses, or disappears from view.
+YOLO Pose tracks their skeleton and detects rapid downward motion, horizontal body position,
+or sudden disappearance from frame.
 
 RESPONSE RULES:
-- Be decisive. If someone has collapsed, DISPATCH immediately.
-- For security intrusions: describe WHAT you see and WHERE (e.g., "masked individual near entrance")
+- Be decisive. If someone has collapsed or fallen, DISPATCH immediately.
+- Describe WHAT you see: are they on the floor? Moving? Conscious?
 - Use the video to provide real descriptions, not generic text.
 - Speak concisely — responders need fast, clear information.
-- If the alert looks like a false positive (person just sitting/stretching), use assess_only.
+- If the alert looks like a false positive (person just sitting/bending/stretching), use assess_only.
 - You protect lives. Act fast on genuine emergencies."""
 
 
@@ -684,17 +531,18 @@ def build_aria_agent(
 
         # Send text alert to Gemini Realtime session — it already sees the
         # video, so this gives it structured context to act on immediately.
+        # Gemini visually confirms or rejects the detection before dispatching.
         prompt = (
             f"[ARIA VISION ALERT]\n"
             f"Camera: {event.camera_id} ({event.location})\n"
-            f"Detected: {event.incident_type.replace('_', ' ').upper()}\n"
+            f"Detected: PATIENT FALL / SUDDEN COLLAPSE\n"
             f"Incident Type Key: {event.incident_type}\n"
             f"CV Severity: {event.severity}\n"
             f"Scene: {event.description}\n"
             f"Time: {time.strftime('%H:%M:%S', time.localtime(event.ts))}\n\n"
             f"Incident ID: {event.camera_id}_{int(event.ts)}\n"
             f"Use incident_type='{event.incident_type}' when calling initiate_response.\n"
-            f"Look at the live video feed to confirm, then assess and respond."
+            f"Look at the live video feed to confirm the patient has fallen, then assess and respond."
         )
         asyncio.create_task(agent.simple_response(prompt))
 

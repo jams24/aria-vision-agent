@@ -138,20 +138,21 @@ class ClawtunnelClient:
         return {"id": uid, "channelId": uid}
 
     async def wait_for_answer(
-        self, channel_id: str, timeout: float = 8.0
+        self, channel_id: str, timeout: float = 15.0
     ) -> bool:
         """
-        For internal ZIP extension calls, clawtunnel's ARI layer handles
-        bridging automatically and does NOT send HTTP callbacks.
-        We wait a fixed settle time for the SIP endpoint to ring and
-        answer, then assume success so the dispatcher proceeds to TTS.
+        Wait for the call to be answered or fail.
 
-        If a callback does arrive (e.g. for future PSTN calls), we
-        honour it immediately.
+        For internal ZIP extension calls, clawtunnel's ARI layer handles
+        bridging automatically.  We poll the call status via API to check
+        if the callee has actually answered.  If no definitive status
+        after timeout, assume answered so TTS briefing can proceed.
         """
-        settle_time = min(timeout, 3.0)  # wait 3s for call to connect
-        deadline = time.monotonic() + settle_time
+        poll_interval = 1.0
+        deadline = time.monotonic() + timeout
+
         while time.monotonic() < deadline:
+            # Check callback-delivered status first
             st = self._call_status.get(channel_id, {})
             if st.get("answered"):
                 log.info("Call answered (callback)", uuid=channel_id)
@@ -159,12 +160,34 @@ class ClawtunnelClient:
             if st.get("hangup"):
                 log.info("Call hung up before answer", uuid=channel_id)
                 return False
-            await asyncio.sleep(0.5)
 
-        # No callback received — assume answered (internal calls don't callback)
+            # Poll clawtunnel for call status
+            try:
+                assert self._session
+                url = f"{self.base_url}/v1/call-status"
+                async with self._session.post(url, json={
+                    "apikey": self.api_key, "uuid": channel_id
+                }) as resp:
+                    data = await resp.json(content_type=None)
+                    status = data.get("answered")
+                    hangup = data.get("hangup")
+                    if hangup:
+                        log.info("Call ended (polled)", uuid=channel_id)
+                        self._call_status.setdefault(channel_id, {})["hangup"] = True
+                        return False
+                    if status:
+                        log.info("Call answered (polled)", uuid=channel_id)
+                        self._call_status.setdefault(channel_id, {})["answered"] = True
+                        return True
+            except Exception:
+                pass  # API may not support this endpoint yet — fall through
+
+            await asyncio.sleep(poll_interval)
+
+        # Timeout — assume answered for internal calls so TTS can proceed
         self._call_status.setdefault(channel_id, {})["answered"] = True
-        log.info("Assuming call answered (internal call, no callback)",
-                 uuid=channel_id)
+        log.info("Call answer assumed after timeout", uuid=channel_id,
+                 timeout=timeout)
         return True
 
     async def hangup(self, channel_id: str) -> None:

@@ -2,9 +2,7 @@ export type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export type IncidentType =
   | "medical_fall"
-  | "fire"
-  | "security_intrusion"
-  | "unresponsive_person";
+  | "sudden_collapse";
 
 export interface Incident {
   id: string;
@@ -23,7 +21,7 @@ export interface Incident {
 export interface Responder {
   id: string;
   name: string;
-  status: "idle" | "calling" | "answered" | "no_answer";
+  status: "idle" | "calling" | "on_call" | "answered" | "no_answer" | "ended";
   incident_id?: string;
 }
 
@@ -37,6 +35,7 @@ export type ARIAEvent =
   | { event: "responder_calling"; data: { incident_id: string; responder_id: string } }
   | { event: "responder_joined"; data: { incident_id: string; responder_id: string } }
   | { event: "responder_no_answer"; data: { incident_id: string; responder_id: string } }
+  | { event: "responder_hangup"; data: { incident_id: string; responder_id: string } }
   | { event: "claude_reasoning"; data: { text: string } }
   | { event: "tool_call"; data: { tool: string; input: Record<string, unknown> } }
   | { event: "camera_frame"; data: { camera_id: string; frame_b64: string } };

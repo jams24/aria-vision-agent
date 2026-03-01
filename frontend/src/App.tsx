@@ -10,9 +10,6 @@ import clsx from "clsx";
 
 const SIMULATE_TYPES = [
   { type: "medical_fall",       label: "🏥 Patient Fall",      severity: "HIGH"     },
-  { type: "fire",               label: "🔥 Fire / Smoke",      severity: "CRITICAL" },
-  { type: "security_intrusion", label: "🚨 Intrusion",         severity: "HIGH"     },
-  { type: "unresponsive_person",label: "⚠️ Unresponsive",      severity: "CRITICAL" },
 ];
 
 export default function App() {
@@ -265,8 +262,10 @@ export default function App() {
                     key={r.id}
                     className={clsx(
                       "flex items-center justify-between px-3 py-2 rounded-lg text-xs",
-                      r.status === "answered"    ? "bg-green-950/50 border border-green-800"
+                      r.status === "on_call"     ? "bg-green-950/50 border border-green-800"
+                      : r.status === "answered"  ? "bg-green-950/50 border border-green-800"
                       : r.status === "calling"   ? "bg-blue-950/50 border border-blue-800"
+                      : r.status === "ended"     ? "bg-slate-900/50 border border-slate-700"
                       : r.status === "no_answer" ? "bg-red-950/30 border border-red-900"
                       : "bg-slate-900 border border-slate-800"
                     )}
@@ -274,12 +273,19 @@ export default function App() {
                     <span className="text-slate-200">{r.name.replace("_", " ")}</span>
                     <span className={clsx(
                       "font-bold uppercase",
-                      r.status === "answered"    ? "text-green-400"
+                      r.status === "on_call"     ? "text-green-400"
+                      : r.status === "answered"  ? "text-green-400"
                       : r.status === "calling"   ? "text-blue-400 animate-pulse"
+                      : r.status === "ended"     ? "text-slate-500"
                       : r.status === "no_answer" ? "text-red-400"
                       : "text-slate-500"
                     )}>
-                      {r.status === "calling" ? "📞 Ringing..." : r.status}
+                      {r.status === "calling" ? "📞 RINGING..."
+                       : r.status === "on_call" ? "🟢 ON CALL"
+                       : r.status === "answered" ? "🟢 ON CALL"
+                       : r.status === "ended" ? "ENDED"
+                       : r.status === "no_answer" ? "NO ANSWER"
+                       : r.status}
                     </span>
                   </div>
                 ))

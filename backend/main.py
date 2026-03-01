@@ -298,9 +298,6 @@ async def websocket_endpoint(ws: WebSocket):
                 descs = {
                     "sudden_collapse":      "Person collapsed suddenly, on floor unresponsive.",
                     "medical_fall":         "Person collapsed suddenly, on floor unresponsive.",
-                    "fire":                 "Smoke near east exit. Flames visible.",
-                    "security_intrusion":   "Unrecognized individual forcing locked door.",
-                    "unresponsive_person":  "Person motionless and unresponsive for extended period.",
                 }
                 itype = msg.get("incident_type", "sudden_collapse")
                 # Frontend sends "medical_fall" but backend uses "sudden_collapse"

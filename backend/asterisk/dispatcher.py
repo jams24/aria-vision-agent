@@ -230,6 +230,14 @@ class ARIDispatcher:
             incident._live_update_task.cancel()
             incident._live_update_task = None
 
+        # Broadcast hangup for each remaining responder
+        for resp_id in list(incident.responder_channels.keys()):
+            await self._broadcast_event("responder_hangup", {
+                "incident_id": incident.id,
+                "responder_id": resp_id,
+            })
+        incident.responder_channels.clear()
+
         # Release global call lock
         self._call_active = False
 
@@ -433,6 +441,14 @@ class ARIDispatcher:
         """Auto-resolve an incident and clear cooldowns so new detections trigger new calls."""
         incident.resolved = True
         incident._live_update_task = None
+
+        # Broadcast hangup for each remaining responder
+        for resp_id in list(incident.responder_channels.keys()):
+            await self._broadcast_event("responder_hangup", {
+                "incident_id": incident.id,
+                "responder_id": resp_id,
+            })
+        incident.responder_channels.clear()
 
         # Remove from active incidents so new detections can fire
         self.active_incidents.pop(incident.id, None)

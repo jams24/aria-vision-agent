@@ -2,7 +2,7 @@
 
 > **She sees everything. She calls everyone.**
 >
-> A real-time AI safety agent that watches live camera feeds, detects emergencies using YOLO Pose skeleton tracking + Gemini Realtime visual AI, and automatically dispatches responders via phone calls and Telegram alerts — all in under 3 seconds.
+> A real-time AI safety agent that watches live camera feeds, detects patient falls using YOLO Pose skeleton tracking, confirms via Gemini Realtime visual AI, and automatically dispatches responders via phone calls and Telegram alerts — all autonomously.
 
 Built for the [Vision Possible: Agent Protocol](https://wemakedevs.org) hackathon by WeMakeDevs x GetStream.
 
@@ -10,22 +10,19 @@ Built for the [Vision Possible: Agent Protocol](https://wemakedevs.org) hackatho
 
 ## Demo
 
-| Live Camera + Skeleton Overlay | Incident Detected + Phone Dispatch |
+| Live Camera + Skeleton Overlay | Fall Detected → Phone Dispatch |
 |---|---|
-| YOLO Pose draws 17-keypoint skeleton on every person in real-time | ARIA detects collapse, confirms via Gemini, calls nurse automatically |
+| YOLO Pose draws 17-keypoint skeleton on every person in real-time | ARIA detects collapse, Gemini confirms visually, nurse called automatically |
 
-**4 detection types, all running simultaneously:**
-- **Sudden Collapse** — YOLO tracks bbox motion + pose keypoints for rapid downward movement
-- **Security Intrusion** — Face-keypoint occlusion detection (masked/hooded individual)
-- **Unresponsive Person** — Stillness tracking (person motionless for 15+ seconds)
-- **Fire / Smoke** — YOLO object class detection
+**What ARIA detects:**
+- **Patient Fall / Sudden Collapse** — YOLO Pose tracks skeleton motion + body position, Gemini Realtime visually confirms before dispatching
 
 ---
 
 ## How It Works
 
 ```
-Camera (5fps) ──► VideoForwarder ──┬──► YOLO Pose (skeleton + detection)
+Camera (5fps) ──► VideoForwarder ──┬──► YOLO Pose (skeleton + fall detection)
                                    │        │
                                    │   IncidentEvent ──► Gemini confirms
                                    │                         │
@@ -42,12 +39,12 @@ Camera (5fps) ──► VideoForwarder ──┬──► YOLO Pose (skeleton + 
 
 ### The Pipeline
 
-1. **YOLO Pose** processes every frame at 5fps — draws 17-keypoint skeleton overlays, tracks bbox motion, monitors face keypoint confidence
-2. **Detection triggers** fire when thresholds are met (collapse motion, face occlusion, stillness, fire class)
-3. **Gemini Realtime** (watching the same camera at 5fps via `VideoForwarder`) receives a `[VISION ALERT]` and visually confirms or rejects the detection using the live video
-4. If confirmed, Gemini calls `initiate_response` via tool calling
-5. **Clawtunnel** (custom telephony platform, also built by me) originates a real phone call to the on-duty responder
-6. **Live TTS briefing** — as the responder answers, Gemini describes the current scene and whispers it via text-to-speech
+1. **YOLO Pose** processes every frame at 5fps — draws 17-keypoint skeleton overlays, tracks bounding box motion and body position
+2. **Fall detection** triggers when YOLO detects rapid downward motion (bbox center-Y drops), body shrinkage (person going horizontal), or skeleton horizontal position (shoulders ≈ hips ≈ ankles Y-coordinate)
+3. **Gemini Realtime** (watching the same camera at 5fps via `VideoForwarder`) receives a `[VISION ALERT]` and visually confirms or rejects the fall using the live video
+4. If confirmed, Gemini calls `initiate_response` via tool calling — no human in the loop
+5. **Clawtunnel** (custom telephony platform, also built by me) originates a real phone call to the on-duty nurse/responder
+6. **Live TTS briefing** — as the responder answers, Gemini describes the current scene and whispers it via text-to-speech into the call
 7. **Telegram bot** simultaneously sends a snapshot image with alert details to the responder's phone
 8. **Dashboard** shows everything in real-time: camera feed with skeleton overlay, ARIA's reasoning, responder call status, incident timeline
 
@@ -89,7 +86,7 @@ Camera (5fps) ──► VideoForwarder ──┬──► YOLO Pose (skeleton + 
 | **Skeleton Detection** | YOLO 11 Pose (`yolo11n-pose.pt`) — 17-keypoint body tracking |
 | **Visual AI** | Gemini Realtime (Live API) — continuous video understanding at 5fps |
 | **Telephony** | [Clawtunnel](https://voice.clawtunnel.com) — custom VoIP platform (built by me) |
-| **TTS Briefings** | ElevenLabs Turbo v2.5 + Azure TTS via Clawtunnel |
+| **TTS Briefings** | Azure TTS via Clawtunnel + Gemini scene descriptions |
 | **Alerts** | Telegram Bot API — snapshot images on every incident |
 | **Backend** | FastAPI + WebSockets + Python 3.14 |
 | **Dashboard** | React 18 + TypeScript + Tailwind CSS |
@@ -113,22 +110,30 @@ Camera (5fps) ──► VideoForwarder ──┬──► YOLO Pose (skeleton + 
 
 ---
 
-## Detection Methods
+## Fall Detection — How It Works
 
-### 1. Sudden Collapse
-Tracks person bounding box center-Y position and height across frames. If center-Y drops rapidly (>10% of frame height) or bbox height shrinks by >25% within 3 seconds, triggers after 3s confirmation. Also detects person disappearance (gone from frame for 4s).
+ARIA uses a **two-stage detection pipeline** — YOLO Pose for fast CV detection, then Gemini Realtime for intelligent visual confirmation.
 
-### 2. Security Intrusion (Face Occlusion)
-YOLO Pose provides confidence scores for 5 face keypoints (nose, eyes, ears). When a person is detected but 3+ face keypoints have <80% confidence for 4+ seconds, the person's face is covered — possible masked intruder.
+### Stage 1: YOLO Pose (Computer Vision)
 
-### 3. Unresponsive Person (Stillness)
-Tracks person bounding box center position frame-to-frame. If movement is <2% of frame dimensions for 15+ consecutive seconds, the person is motionless and potentially unresponsive.
+Three complementary methods run simultaneously:
 
-### 4. Fire / Smoke
-YOLO detects fire, smoke, or flame object classes.
+**Bounding Box Motion Tracking**
+Tracks each person's center-Y position and bbox height across frames. If center-Y drops rapidly (≥10% of frame height) or bbox height shrinks by ≥25% within 3 seconds, a collapse is detected.
 
-### Two-Stage AI Confirmation
-Every YOLO-based detection is sent to Gemini Realtime as a `[VISION ALERT]`. Gemini is already watching the live camera feed and visually confirms or rejects the alert. False positives (person just sitting down, stretching) are caught by Gemini's `assess_only` tool — no unnecessary dispatch.
+**Skeleton Pose Analysis**
+When YOLO provides keypoints, checks if the person's skeleton is horizontal — shoulders, hips, and ankles at roughly the same Y-coordinate (vertical span < 15% of frame). This catches falls even without dramatic motion.
+
+**Person Disappearance**
+If a person was visible and then vanishes from the frame for 4+ seconds, they likely collapsed out of camera view.
+
+### Stage 2: Gemini Realtime (Visual AI Confirmation)
+
+Gemini Realtime watches the same camera feed at 5fps and receives a `[VISION ALERT]` when YOLO triggers. It visually inspects the live video and either:
+- Calls `initiate_response` → dispatches responders automatically
+- Calls `assess_only` → logs the observation without dispatch (false positive)
+
+This two-stage approach eliminates false positives (person just sitting down, bending over, stretching) while ensuring genuine falls get immediate response.
 
 ---
 
@@ -136,7 +141,7 @@ Every YOLO-based detection is sent to Gemini Realtime as a `[VISION ALERT]`. Gem
 
 [voice.clawtunnel.com](https://voice.clawtunnel.com) is a VoIP telephony platform **built by me** that ARIA uses for phone call dispatch. It provides:
 
-- **REST API** for call origination — `POST /v1/calls/originate`
+- **REST API** for call origination — `POST /v1/internal-call`
 - **Real-time call status** — answer detection, hangup events via webhook callbacks
 - **Text-to-Speech injection** — `POST /v1/tts` whispers live AI briefings into active calls
 - **Azure Neural TTS** — natural-sounding voice for emergency briefings
@@ -150,7 +155,7 @@ This replaces traditional Asterisk/Twilio setups with a lightweight, hackathon-f
 ### Prerequisites
 - Python 3.11+ (developed on 3.14)
 - A webcam
-- API keys: Gemini, Stream, ElevenLabs, Clawtunnel
+- API keys: Gemini, Stream, Clawtunnel
 
 ### 1. Install
 
@@ -185,10 +190,9 @@ cd frontend && npm install && npm run dev
 ### 4. Demo
 
 1. Open the dashboard — you'll see the live camera feed with skeleton overlay
-2. **Collapse**: Duck out of camera frame quickly (person disappearance triggers in 4s)
-3. **Intrusion**: Pull a hoodie over your face (face occlusion triggers in 4s)
-4. **Unresponsive**: Stand completely still for 15 seconds
-5. Watch ARIA detect → Gemini confirm → phone ring → Telegram alert arrive
+2. **Fall**: Duck down quickly or drop out of camera frame (triggers in ~3-4s)
+3. **Disappear**: Walk out of frame after being visible (triggers in ~4s)
+4. Watch ARIA detect → Gemini confirm → phone ring → Telegram alert arrive
 
 ---
 
@@ -198,11 +202,10 @@ cd frontend && npm install && npm run dev
 aria/
   backend/
     agent/
-      vision_aria.py            # YOLO Pose + Gemini Realtime + all 4 detections
+      vision_aria.py            # YOLO Pose + Gemini Realtime + fall detection
     asterisk/
       dispatcher.py             # Incident dispatch, phone calls, TTS briefings
       clawtunnel_client.py      # Clawtunnel REST telephony client
-      client.py                 # Base telephony client interface
     notifications/
       telegram.py               # Telegram Bot API — snapshot alerts
     main.py                     # FastAPI server + WebSocket hub

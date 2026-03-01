@@ -52,11 +52,27 @@ export function useARIA() {
           if (existing) next.set(ev.data.id, { ...existing, resolved: true });
           return next;
         });
+        // Mark all responders as ended when incident resolves
+        setResponders((prev) => {
+          const next = new Map(prev);
+          for (const [id, r] of next) {
+            if (r.status === "on_call" || r.status === "calling") {
+              next.set(id, { ...r, status: "ended" });
+            }
+          }
+          return next;
+        });
         break;
 
       case "responder_calling":
         setResponders((prev) => {
-          const next = new Map(prev);
+          // Clear any old ended/no_answer responders when new call starts
+          const next = new Map<string, Responder>();
+          for (const [id, r] of prev) {
+            if (r.status !== "ended" && r.status !== "no_answer") {
+              next.set(id, r);
+            }
+          }
           const existing = next.get(ev.data.responder_id) ?? {
             id: ev.data.responder_id,
             name: ev.data.responder_id,
@@ -75,7 +91,7 @@ export function useARIA() {
         setResponders((prev) => {
           const next = new Map(prev);
           const existing = next.get(ev.data.responder_id);
-          if (existing) next.set(ev.data.responder_id, { ...existing, status: "answered" });
+          if (existing) next.set(ev.data.responder_id, { ...existing, status: "on_call" });
           return next;
         });
         break;
@@ -85,6 +101,15 @@ export function useARIA() {
           const next = new Map(prev);
           const existing = next.get(ev.data.responder_id);
           if (existing) next.set(ev.data.responder_id, { ...existing, status: "no_answer" });
+          return next;
+        });
+        break;
+
+      case "responder_hangup":
+        setResponders((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(ev.data.responder_id);
+          if (existing) next.set(ev.data.responder_id, { ...existing, status: "ended" });
           return next;
         });
         break;
