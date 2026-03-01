@@ -9,7 +9,6 @@ import asyncio
 import base64
 import os
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -127,19 +126,9 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
     name = "aria_incident_processor"
 
     YOLO_CONFIDENCE       = 0.45
-    # ── Sudden-collapse detection (motion-tracking based) ──────────
-    COLLAPSE_DROP_PCT     = 0.10   # center-Y jumps down by ≥10% of frame height
-    COLLAPSE_SHRINK_PCT   = 0.25   # bbox height shrinks by ≥25%
-    COLLAPSE_TIME_WINDOW  = 3.0    # change must happen within 3 seconds
-    COLLAPSE_CONFIRM_SECS = 3.0    # stay "collapsed" for 3s before alerting
     # ── Person disappearance detection ─────────────────────────────
     DISAPPEAR_SECS        = 4.0    # person gone from frame for 4s = collapsed
-    INCIDENT_COOLDOWN     = 120.0  # 2-min cooldown between same-type incidents
-
-    # COCO keypoint indices (used for collapse pose detection)
-    L_SHOULDER, R_SHOULDER = 5, 6
-    L_HIP, R_HIP = 11, 12
-    L_ANKLE, R_ANKLE = 15, 16
+    INCIDENT_COOLDOWN     = 30.0   # 30s cooldown (short for demo)
 
     def __init__(self, camera_id: str = "cam_00",
                  location: str = "Main Lobby",
@@ -157,15 +146,13 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
         self._output_track      = QueuedVideoTrack()
         self._agent: Agent | None = None
         self._dispatcher        = None  # set by build_aria_agent
-        # Collapse motion tracking: deque of (timestamp, center_y_norm, bbox_h_norm)
-        self._person_history: deque = deque(maxlen=30)   # ~6s at 5 fps
-        self._collapse_since: float | None = None
         # Person disappearance tracking
         self._person_last_seen: float = 0.0       # last time a person was in frame
         self._person_was_present: bool = False     # was a person visible recently?
         self._disappear_fired: bool = False        # already fired disappearance alert?
         self._last_fired: dict[str, float] = {}
         self._last_broadcast    = 0.0
+        self._last_gemini_nudge = 0.0             # periodic Gemini monitoring
 
     # ── Vision Agents SDK hooks ──────────────────────────────────────────────
 
@@ -236,99 +223,21 @@ class ARIAIncidentProcessor(VideoProcessorPublisher):
             self._person_last_seen = time.time()
             self._person_was_present = True
             self._disappear_fired = False
-            await self._check_sudden_collapse(img, results)
         else:
             await self._check_person_disappeared(img)
 
-    async def _check_sudden_collapse(self, img, results) -> None:
-        """
-        Hybrid collapse detection using BOTH bbox motion tracking AND
-        YOLO Pose keypoints when available.
-
-        Stage 1 (bbox): Tracks center-Y and height across frames.
-                         Triggers on rapid downward motion.
-        Stage 2 (pose): If keypoints available, checks if the person's
-                         skeleton is horizontal (shoulders ≈ hips ≈ ankles Y).
-        """
-        frame_h = img.shape[0]
-
-        # Find the person box with highest confidence
-        best_conf, best_cy, best_bh = 0.0, 0.0, 0.0
-        best_idx = -1
-        for i, box in enumerate(results.boxes):
-            if results.names[int(box.cls)].lower() != "person":
-                continue
-            conf = float(box.conf)
-            if conf > best_conf:
-                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
-                best_conf = conf
-                best_cy   = (y1 + y2) / 2.0 / frame_h   # normalised 0-1
-                best_bh   = (y2 - y1) / frame_h          # normalised 0-1
-                best_idx  = i
-
-        if best_idx < 0:
-            return   # no person in frame — nothing to track
-
-        now = time.time()
-        self._person_history.append((now, best_cy, best_bh))
-
-        # ── Stage 1: bbox motion tracking ────────────────────────────────
-        collapsed_bbox = False
-        for ts, old_cy, old_bh in self._person_history:
-            age = now - ts
-            if age < 0.5 or age > self.COLLAPSE_TIME_WINDOW:
-                continue
-
-            cy_drop = best_cy - old_cy
-            if cy_drop >= self.COLLAPSE_DROP_PCT:
-                collapsed_bbox = True
-                break
-
-            if old_bh > 0.10:
-                bh_shrink = (old_bh - best_bh) / old_bh
-                if bh_shrink >= self.COLLAPSE_SHRINK_PCT:
-                    collapsed_bbox = True
-                    break
-
-        # ── Stage 2: pose keypoint check (if available) ──────────────────
-        collapsed_pose = False
-        if results.keypoints is not None and len(results.keypoints) > best_idx:
-            kpts = results.keypoints[best_idx]
-            if kpts is not None and kpts.xyn is not None and len(kpts.xyn) > 0:
-                kp = kpts.xyn[0]   # normalised keypoints [17, 2]
-                if len(kp) >= 17:
-                    # Get Y positions of key body parts (normalised 0-1)
-                    shoulder_y = float((kp[self.L_SHOULDER][1] + kp[self.R_SHOULDER][1]) / 2)
-                    hip_y      = float((kp[self.L_HIP][1] + kp[self.R_HIP][1]) / 2)
-                    ankle_y    = float((kp[self.L_ANKLE][1] + kp[self.R_ANKLE][1]) / 2)
-
-                    # If all visible (non-zero) and vertical span is tiny = horizontal person
-                    if shoulder_y > 0.01 and hip_y > 0.01 and ankle_y > 0.01:
-                        vertical_span = abs(ankle_y - shoulder_y)
-                        if vertical_span < 0.15:  # skeleton is very flat / horizontal
-                            collapsed_pose = True
-
-        # Either trigger is enough (bbox motion OR skeleton horizontal)
-        collapsed = collapsed_bbox or collapsed_pose
-
-        if collapsed:
-            if self._collapse_since is None:
-                self._collapse_since = now
-                self._collapse_snapshot = img.copy()  # capture frame at moment of collapse
-                trigger = "pose" if collapsed_pose else "bbox"
-                log.info("Sudden collapse detected", camera=self.camera_id,
-                         trigger=trigger, cy=round(best_cy, 2), bh=round(best_bh, 2))
-            elapsed = now - self._collapse_since
-            if elapsed >= self.COLLAPSE_CONFIRM_SECS and not self._on_cooldown("sudden_collapse"):
-                severity = "CRITICAL" if elapsed > 15 else "HIGH"
-                snap = getattr(self, '_collapse_snapshot', img)
-                self._collapse_snapshot = None
-                await self._emit(
-                    "sudden_collapse", severity, snap,
-                    f"Person collapsed suddenly, down for {int(elapsed)}s. Immediate assistance needed.",
-                )
-        else:
-            self._collapse_since = None
+        # ── Periodic Gemini nudge — keeps Gemini actively watching ────
+        # Gemini Realtime sees the video continuously but may go passive.
+        # Every 10s, nudge it to check the scene for patient falls.
+        if self._agent and now - self._last_gemini_nudge >= 10.0:
+            self._last_gemini_nudge = now
+            person_status = "A person is visible" if "person" in detected else "No person in frame"
+            asyncio.create_task(self._agent.simple_response(
+                f"[ARIA MONITOR] {person_status}. "
+                f"Check the live video — has the patient fallen, collapsed, or is lying on the floor? "
+                f"If YES, call initiate_response immediately with incident_type='sudden_collapse'. "
+                f"If the patient is safe, stay silent."
+            ))
 
     async def _check_person_disappeared(self, img) -> None:
         """
@@ -377,26 +286,37 @@ SYSTEM_PROMPT = """You are ARIA — Autonomous Response Intelligence Agent.
 You have a live camera feed. You can see the scene in real-time via video.
 YOLO Pose draws skeleton overlays on each person showing their body position.
 
-YOUR ROLE:
-- Watch the live video feed continuously for patient falls and collapses
-- When you receive a [VISION ALERT], look at the video to confirm or reject it
-- If you see a genuine fall or collapse, call initiate_response immediately
-- Provide clear, calm spoken updates to the Stream call participants
-- Keep monitoring and call update_incident as the situation evolves
-- Call resolve_incident when the patient is safe / situation resolved
+YOU ARE THE PRIMARY FALL DETECTOR. You watch the video continuously and
+proactively detect when a patient falls, collapses, slumps, or goes down.
+Do NOT wait to be told — if you SEE it happen, ACT immediately.
 
-DETECTABLE EMERGENCY:
-PATIENT FALL / SUDDEN COLLAPSE — Person falls down, goes limp, collapses, or disappears from view.
-YOLO Pose tracks their skeleton and detects rapid downward motion, horizontal body position,
-or sudden disappearance from frame.
+YOUR ROLE:
+- Watch the live video feed CONTINUOUSLY and PROACTIVELY for patient falls
+- When you receive an [ARIA MONITOR] check, look at the video RIGHT NOW
+- If the patient has fallen, collapsed, is lying down, or is on the floor:
+  → Call initiate_response IMMEDIATELY with incident_type='sudden_collapse'
+- If the patient is standing/sitting normally, stay silent (do not speak)
+- After dispatching, describe what you see to help responders
+
+WHAT COUNTS AS A FALL:
+- Person goes from upright to lying/slumped position
+- Person is on the floor or slumped in their chair
+- Person's body is horizontal when it was previously vertical
+- Person suddenly drops, falls sideways, or collapses
 
 RESPONSE RULES:
-- Be decisive. If someone has collapsed or fallen, DISPATCH immediately.
-- Describe WHAT you see: are they on the floor? Moving? Conscious?
-- Use the video to provide real descriptions, not generic text.
-- Speak concisely — responders need fast, clear information.
-- If the alert looks like a false positive (person just sitting/bending/stretching), use assess_only.
-- You protect lives. Act fast on genuine emergencies."""
+- Be DECISIVE. If someone looks like they've fallen, DISPATCH. Don't overthink.
+- When you call initiate_response, use these exact parameters:
+  incident_id: 'cam_00_' + current unix timestamp (e.g. 'cam_00_1709312400')
+  incident_type: 'sudden_collapse'
+  severity: 'HIGH'
+  location: the camera location
+  description: what you see in the video
+  camera_id: 'cam_00'
+  timestamp: current unix time
+- After dispatching, provide situational updates via update_incident
+- Call resolve_incident when the patient recovers
+- You protect lives. Speed matters. Act fast."""
 
 
 def build_aria_agent(
@@ -529,20 +449,31 @@ def build_aria_agent(
             frame_jpg=event.frame_jpg if event.frame_jpg else None,
         ))
 
-        # Send text alert to Gemini Realtime session — it already sees the
-        # video, so this gives it structured context to act on immediately.
-        # Gemini visually confirms or rejects the detection before dispatching.
+        # YOLO has already confirmed the collapse (3s sustained detection).
+        # Dispatch responders immediately — don't wait for Gemini to decide.
+        incident_id = f"{event.camera_id}_{int(event.ts)}"
+        log.info("Direct dispatch (YOLO confirmed collapse)",
+                 incident_type=event.incident_type, incident_id=incident_id)
+        asyncio.create_task(dispatcher.initiate_response(
+            incident_id=incident_id,
+            incident_type=event.incident_type,
+            severity=event.severity,
+            location=event.location,
+            description=event.description,
+            camera_id=event.camera_id,
+            timestamp=event.ts,
+        ))
+
+        # Also notify Gemini Realtime so it can provide ongoing situational
+        # updates and scene descriptions to responders on the call.
         prompt = (
-            f"[ARIA VISION ALERT]\n"
+            f"[ARIA — PATIENT FALL DISPATCHED]\n"
             f"Camera: {event.camera_id} ({event.location})\n"
-            f"Detected: PATIENT FALL / SUDDEN COLLAPSE\n"
-            f"Incident Type Key: {event.incident_type}\n"
-            f"CV Severity: {event.severity}\n"
+            f"A patient fall has been detected and responders are being called.\n"
             f"Scene: {event.description}\n"
             f"Time: {time.strftime('%H:%M:%S', time.localtime(event.ts))}\n\n"
-            f"Incident ID: {event.camera_id}_{int(event.ts)}\n"
-            f"Use incident_type='{event.incident_type}' when calling initiate_response.\n"
-            f"Look at the live video feed to confirm the patient has fallen, then assess and respond."
+            f"Monitor the patient and provide updates. Describe what you see — "
+            f"are they moving? Conscious? Getting up? Use update_incident to relay info."
         )
         asyncio.create_task(agent.simple_response(prompt))
 
@@ -606,6 +537,18 @@ async def start_local_camera(
         await llm.watch_video_track(camera_track, shared_forwarder=forwarder)
         log.info("Gemini Realtime watching camera feed",
                  camera_id=camera_id, gemini_fps=getattr(llm, 'fps', '?'))
+
+        # Give Gemini a moment to connect, then start proactive monitoring
+        async def _start_monitoring():
+            await asyncio.sleep(3)
+            log.info("Sending initial monitoring prompt to Gemini")
+            await agent.simple_response(
+                "Camera feed is now LIVE. You are monitoring for patient falls. "
+                "Watch the video carefully. If at any point you see the patient fall, "
+                "collapse, or end up on the floor, call initiate_response immediately. "
+                "Stay alert and silent until you detect a fall."
+            )
+        asyncio.create_task(_start_monitoring())
     else:
         log.warning("LLM does not support watch_video_track — Gemini Realtime video disabled")
 
