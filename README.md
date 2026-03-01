@@ -14,6 +14,10 @@ Built for the [Vision Possible: Agent Protocol](https://wemakedevs.org) hackatho
 
 *ARIA detects a patient collapse via YOLO Pose skeleton tracking → Gemini Realtime confirms visually → nurse 101 called automatically → live situational updates on the incident card.*
 
+![Telegram Alert — Snapshot sent to responder's phone](docs/aria-telegram-alert.png)
+
+*Telegram alert with snapshot image delivered instantly to the responder's phone — includes severity, location, camera ID, and description of the incident.*
+
 **What ARIA detects:**
 - **Patient Fall / Sudden Collapse** — Gemini Realtime watches the live camera feed and proactively detects when a patient falls, collapses, or goes down. YOLO Pose provides 17-keypoint skeleton overlay for visual monitoring.
 
