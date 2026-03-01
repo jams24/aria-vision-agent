@@ -1,0 +1,70 @@
+# ─── Response Protocols ───────────────────────────────────────────────────────
+# Maps incident_type + severity → responder groups + actions
+# NOTE: Demo mode — all incidents route to nurse_101 (ext 10000) only.
+
+protocols:
+
+  sudden_collapse:
+    display_name: "Sudden Collapse"
+    icon: "🚨"
+    severity_map:
+      HIGH:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+      CRITICAL:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+
+  fire:
+    display_name: "Fire / Smoke Detected"
+    icon: "🔥"
+    severity_map:
+      HIGH:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+      CRITICAL:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+
+  security_intrusion:
+    display_name: "Unauthorized Access"
+    icon: "🚨"
+    severity_map:
+      MEDIUM:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+      HIGH:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+      CRITICAL:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+
+  unresponsive_person:
+    display_name: "Unresponsive Person"
+    icon: "⚠️"
+    severity_map:
+      HIGH:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null
+      CRITICAL:
+        groups: [nurse_101]
+        escalate_after_s: 0
+        escalate_to: []
+        pa_announcement: null

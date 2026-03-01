@@ -1,0 +1,56 @@
+# ─── Responder Registry ──────────────────────────────────────────────────────
+# Each responder has a ZIP extension (5-digit internal SIP extension) registered
+# in the voice.clawtunnel.com system.
+# ClawtunnelClient strips any "PJSIP/" prefix before calling POST /v1/internal-call.
+# ARIA's own extension is 10000 (set via CLAWTUNNEL_ARIA_EXTENSION in .env).
+# Escalation ladder: ARIA tries responders in tier order.
+# If no one answers in `timeout_s`, it moves to the next tier.
+
+responders:
+  - id: nurse_101
+    name: "Nurse Station A"
+    extension: "10000"
+    roles: [medical, first_response]
+    tier: 1
+    timeout_s: 20
+
+  - id: nurse_102
+    name: "Nurse Station B"
+    extension: "10002"
+    roles: [medical, first_response]
+    tier: 1
+    timeout_s: 20
+
+  - id: head_nurse
+    name: "Head Nurse"
+    extension: "10003"
+    roles: [medical, supervisor]
+    tier: 2
+    timeout_s: 20
+
+  - id: on_call_md
+    name: "On-Call Physician"
+    extension: "10004"
+    roles: [medical, critical]
+    tier: 2
+    timeout_s: 20
+
+  - id: security_desk
+    name: "Security Desk"
+    extension: "10005"
+    roles: [security, fire]
+    tier: 1
+    timeout_s: 20
+
+  - id: emergency_services
+    name: "Emergency Services"
+    extension: "10006"
+    roles: [medical, security, fire, critical]
+    tier: 3
+    timeout_s: 20
+
+# ─── Responder Groups (used by protocols) ────────────────────────────────────
+groups:
+  medical_team:   [nurse_101, nurse_102, head_nurse, on_call_md]
+  security_team:  [security_desk]
+  all_critical:   [head_nurse, on_call_md, security_desk, emergency_services]
